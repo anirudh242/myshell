@@ -76,6 +76,7 @@ int launch(char **args) {
             // execvp expects a program name (args[0]) and an array of
             // strings (args)
             perror("Unsuccesful exec()");
+            exit(EXIT_FAILURE);
         }
     } else if (pid < 0) { // error forking
         perror("Could not start child process");
@@ -140,8 +141,18 @@ void sh_loop() {
     char *line;
     char **args;
     int status;
+    char cwd_buf[1024];
     do {
-        printf("$ ");
+        if (getcwd(cwd_buf, sizeof(cwd_buf)) == NULL) {
+            perror("Error getting current directory");
+            break;
+        }
+        char *home = getenv("HOME");
+        if (home != NULL && strncmp(cwd_buf, home, strlen(home)) == 0) {
+            printf("~%s $ ", cwd_buf + strlen(home));
+        } else {
+            printf("%s $ ", cwd_buf);
+        }
         // read
         line = read_line();
         // parse
