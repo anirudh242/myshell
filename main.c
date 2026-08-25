@@ -1,3 +1,4 @@
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -68,10 +69,43 @@ char **parse_line(char *line) {
 }
 
 int launch(char **args) {
+    char *in_file = NULL;
+    char *out_file = NULL;
+    for (int i = 0; args[i] != NULL; i++) {
+        if (strcmp(args[i], "<") == 0) {
+            in_file = args[i + 1];
+            args[i] = NULL;
+        } else if (strcmp(args[i], ">") == 0) {
+            out_file = args[i + 1];
+            args[i] = NULL;
+        }
+    }
+
     pid_t pid, wpid;
     int status;
+
     pid = fork();
     if (pid == 0) { // child process
+        if (in_file != NULL) {
+            int in_fd = open(in_file, O_RDONLY);
+            if (in_fd < 0) {
+                perror("Error opening input file");
+                exit(EXIT_FAILURE);
+            }
+            dup2(in_fd, STDIN_FILENO);
+            close(in_fd);
+        }
+
+        if (out_file != NULL) {
+            int out_fd = open(out_file, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+            if (out_fd < 0) {
+                perror("Error opening output file");
+                exit(EXIT_FAILURE);
+            }
+            dup2(out_fd, STDOUT_FILENO);
+            close(out_fd);
+        }
+
         if (execvp(args[0], args) == -1) {
             // execvp expects a program name (args[0]) and an array of
             // strings (args)
