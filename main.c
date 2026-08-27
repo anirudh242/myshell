@@ -10,6 +10,13 @@
 #define PL_BUF_SZ 64
 #define PL_DELIMITER " \t\r\n\a"
 
+typedef struct {
+    char **args;
+    char *in_file;
+    char *out_file;
+    int append;
+} Command;
+
 char *read_line() {
     int buf_size = RL_BUF_SZ;
     char *buf = malloc(sizeof(char) * buf_size);
@@ -42,73 +49,80 @@ char *read_line() {
     }
 }
 
-char **parse_line(char *line) {
+Command parse_line(char *line) {
     int buf_size = PL_BUF_SZ;
     int pos = 0;
     char **tokens = malloc(sizeof(char *) * buf_size);
     if (!tokens) {
         fprintf(stderr, "Could not allocate memory for token buffer");
+        exit(EXIT_FAILURE);
     }
+
+    Command command;
+    command.in_file = NULL;
+    command.out_file = NULL;
+    command.append = 0;
 
     char *token = strtok(line, PL_DELIMITER);
     while (token) {
-        tokens[pos] = token;
-        pos++;
-        if (pos >= buf_size) {
-            buf_size += PL_BUF_SZ;
-            tokens = realloc(tokens, sizeof(char *) * buf_size);
-            if (!tokens) {
-                fprintf(stderr, "Could not reallocate memory for token buffer");
+        if (strcmp(token, "<") == 0) {
+            token = strtok(NULL, PL_DELIMITER);
+            if (token == NULL) {
+                fprintf(stderr, "Expected file after '<'\n");
+                free(tokens);
                 exit(EXIT_FAILURE);
+            }
+            command.in_file = token;
+        } else if (strcmp(token, ">") == 0) {
+            token = strtok(NULL, PL_DELIMITER);
+            if (token == NULL) {
+                fprintf(stderr, "Expected file after '>'\n");
+                free(tokens);
+                exit(EXIT_FAILURE);
+            }
+            command.out_file = token;
+            command.append = 0;
+        } else if (strcmp(token, ">>") == 0) {
+            token = strtok(NULL, PL_DELIMITER);
+            if (token == NULL) {
+                fprintf(stderr, "Expected file after '>>'\n");
+                free(tokens);
+                exit(EXIT_FAILURE);
+            }
+            command.out_file = token;
+            command.append = 1;
+        } else {
+            tokens[pos] = token;
+            pos++;
+            if (pos >= buf_size) {
+                buf_size += PL_BUF_SZ;
+                tokens = realloc(tokens, sizeof(char *) * buf_size);
+                if (!tokens) {
+                    fprintf(stderr,
+                            "Could not reallocate memory for token buffer");
+                    exit(EXIT_FAILURE);
+                }
             }
         }
         token = strtok(NULL, PL_DELIMITER); // NULL means move on to next token
     }
+
     tokens[pos] = NULL; // to identify end of arr
-    return tokens;
+
+    command.args = tokens;
+
+    return command;
 }
 
-int launch(char **args) {
-    char *in_file = NULL;
-    char *out_file = NULL;
-    int append = 0;
-
-    for (int i = 0; args[i] != NULL; i++) {
-        if (strcmp(args[i], "<") == 0) {
-            if (args[i + 1] == NULL) {
-                fprintf(stderr, "Expected file after '<'\n");
-                return 1;
-            }
-
-            in_file = args[i + 1];
-            args[i] = NULL;
-        } else if (strcmp(args[i], ">") == 0) {
-            if (args[i + 1] == NULL) {
-                fprintf(stderr, "Expected file after '>'\n");
-                return 1;
-            }
-            out_file = args[i + 1];
-            append = 0;
-            args[i] = NULL;
-        } else if (strcmp(args[i], ">>") == 0) {
-            if (args[i + 1] == NULL) {
-                fprintf(stderr, "Expected file after '>>'\n");
-                return 1;
-            }
-
-            out_file = args[i + 1];
-            append = 1;
-            args[i] = NULL;
-        }
-    }
+int launch(Command *command) {
     pid_t pid, wpid;
 
     int status;
 
     pid = fork();
     if (pid == 0) { // child process
-        if (in_file != NULL) {
-            int in_fd = open(in_file, O_RDONLY);
+        if (command->in_file != NULL) {
+            int in_fd = open(command->in_file, O_RDONLY);
             if (in_fd < 0) {
                 perror("Error opening input file");
                 exit(EXIT_FAILURE);
@@ -121,14 +135,14 @@ int launch(char **args) {
             close(in_fd);
         }
 
-        if (out_file != NULL) {
+        if (command->out_file != NULL) {
             int flags = O_WRONLY | O_CREAT;
-            if (append) {
+            if (command->append) {
                 flags |= O_APPEND;
             } else {
                 flags |= O_TRUNC;
             }
-            int out_fd = open(out_file, flags, 0644);
+            int out_fd = open(command->out_file, flags, 0644);
             if (out_fd < 0) {
                 perror("Error opening output file");
                 exit(EXIT_FAILURE);
@@ -141,7 +155,7 @@ int launch(char **args) {
             close(out_fd);
         }
 
-        if (execvp(args[0], args) == -1) {
+        if (execvp(command->args[0], command->args) == -1) {
             // execvp expects a program name (args[0]) and an array of
             // strings (args)
             perror("Unsuccesful exec()");
@@ -192,23 +206,23 @@ int sh_help(char **args) {
 
 int sh_exit(char **args) { return 0; }
 
-int execute(char **args) {
-    if (args[0] == NULL) { // empty command
+int execute(Command *command) {
+    if (command->args[0] == NULL) { // empty command
         return 1;
     }
 
     for (int i = 0; i < num_builtins; i++) {
-        if (strcmp(args[0], builtin_arr[i]) == 0) {
-            return (*builtin_fx[i])(args);
+        if (strcmp(command->args[0], builtin_arr[i]) == 0) {
+            return (*builtin_fx[i])(command->args);
         }
     }
     return launch(
-        args); // if not builtin then it just tries to launch to process
+        command); // if not builtin then it just tries to launch to process
 }
 
 void sh_loop() {
     char *line;
-    char **args;
+    Command command;
     int status;
     char cwd_buf[1024];
     do {
@@ -225,12 +239,12 @@ void sh_loop() {
         // read
         line = read_line();
         // parse
-        args = parse_line(line);
+        command = parse_line(line);
         // execute
-        status = execute(args);
+        status = execute(&command);
         // freeing
         free(line);
-        free(args);
+        free(command.args);
     } while (status);
 }
 
