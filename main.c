@@ -71,17 +71,38 @@ char **parse_line(char *line) {
 int launch(char **args) {
     char *in_file = NULL;
     char *out_file = NULL;
+    int append = 0;
+
     for (int i = 0; args[i] != NULL; i++) {
         if (strcmp(args[i], "<") == 0) {
+            if (args[i + 1] == NULL) {
+                fprintf(stderr, "Expected file after '<'\n");
+                return 1;
+            }
+
             in_file = args[i + 1];
             args[i] = NULL;
         } else if (strcmp(args[i], ">") == 0) {
+            if (args[i + 1] == NULL) {
+                fprintf(stderr, "Expected file after '>'\n");
+                return 1;
+            }
             out_file = args[i + 1];
+            append = 0;
+            args[i] = NULL;
+        } else if (strcmp(args[i], ">>") == 0) {
+            if (args[i + 1] == NULL) {
+                fprintf(stderr, "Expected file after '>>'\n");
+                return 1;
+            }
+
+            out_file = args[i + 1];
+            append = 1;
             args[i] = NULL;
         }
     }
-
     pid_t pid, wpid;
+
     int status;
 
     pid = fork();
@@ -92,17 +113,31 @@ int launch(char **args) {
                 perror("Error opening input file");
                 exit(EXIT_FAILURE);
             }
-            dup2(in_fd, STDIN_FILENO);
+
+            if (dup2(in_fd, STDIN_FILENO) == -1) {
+                perror("dup2");
+                exit(EXIT_FAILURE);
+            }
             close(in_fd);
         }
 
         if (out_file != NULL) {
-            int out_fd = open(out_file, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+            int flags = O_WRONLY | O_CREAT;
+            if (append) {
+                flags |= O_APPEND;
+            } else {
+                flags |= O_TRUNC;
+            }
+            int out_fd = open(out_file, flags, 0644);
             if (out_fd < 0) {
                 perror("Error opening output file");
                 exit(EXIT_FAILURE);
             }
-            dup2(out_fd, STDOUT_FILENO);
+
+            if (dup2(out_fd, STDOUT_FILENO) == -1) {
+                perror("dup2");
+                exit(EXIT_FAILURE);
+            }
             close(out_fd);
         }
 
