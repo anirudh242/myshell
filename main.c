@@ -17,6 +17,11 @@ typedef struct {
     int append;
 } Command;
 
+typedef struct {
+    Command *commands;
+    int count;
+} Pipeline;
+
 char *read_line() {
     int buf_size = RL_BUF_SZ;
     char *buf = malloc(sizeof(char) * buf_size);
@@ -49,7 +54,7 @@ char *read_line() {
     }
 }
 
-Command parse_line(char *line) {
+Pipeline parse_line(char *line) {
     int buf_size = PL_BUF_SZ;
     int pos = 0;
     char **tokens = malloc(sizeof(char *) * buf_size);
@@ -58,7 +63,12 @@ Command parse_line(char *line) {
         exit(EXIT_FAILURE);
     }
 
+    Pipeline pipeline;
+    pipeline.commands = NULL;
+    pipeline.count = 0;
+
     Command command;
+    command.args = tokens;
     command.in_file = NULL;
     command.out_file = NULL;
     command.append = 0;
@@ -91,6 +101,31 @@ Command parse_line(char *line) {
             }
             command.out_file = token;
             command.append = 1;
+        } else if (strcmp(token, "|") == 0) {
+            command.args[pos] = NULL;
+
+            pipeline.count++;
+            pipeline.commands =
+                realloc(pipeline.commands, sizeof(Command) * pipeline.count);
+            if (!pipeline.commands) {
+                fprintf(stderr,
+                        "Could not allocate memory for pipeline commands");
+                exit(EXIT_FAILURE);
+            }
+            pipeline.commands[pipeline.count - 1] = command;
+
+            pos = 0;
+            buf_size = PL_BUF_SZ;
+            tokens = malloc(sizeof(char *) * buf_size);
+            if (!tokens) {
+                fprintf(stderr, "Could not allocate memory for token buffer");
+                exit(EXIT_FAILURE);
+            }
+
+            command.args = tokens;
+            command.in_file = NULL;
+            command.out_file = NULL;
+            command.append = 0;
         } else {
             tokens[pos] = token;
             pos++;
@@ -102,16 +137,25 @@ Command parse_line(char *line) {
                             "Could not reallocate memory for token buffer");
                     exit(EXIT_FAILURE);
                 }
+                command.args = tokens;
             }
         }
         token = strtok(NULL, PL_DELIMITER); // NULL means move on to next token
     }
+    command.args[pos] = NULL; // to identify end of arr
 
-    tokens[pos] = NULL; // to identify end of arr
+    pipeline.count++;
+    pipeline.commands =
+        realloc(pipeline.commands, sizeof(Command) * pipeline.count);
 
-    command.args = tokens;
+    if (!pipeline.commands) {
+        fprintf(stderr, "Could not allocate memory for commands");
+        exit(EXIT_FAILURE);
+    }
 
-    return command;
+    pipeline.commands[pipeline.count - 1] = command;
+
+    return pipeline;
 }
 
 int launch(Command *command) {
@@ -206,23 +250,134 @@ int sh_help(char **args) {
 
 int sh_exit(char **args) { return 0; }
 
-int execute(Command *command) {
-    if (command->args[0] == NULL) { // empty command
-        return 1;
+// pipe[i-1] -> stdin
+// pipe[i] <- stdout
+int execute(Pipeline *pipeline) {
+    if (pipeline->count == 1) { // only one command (no pipe)
+        Command *command = &pipeline->commands[0];
+        if (command->args[0] == NULL) { // empty command
+            return 1;
+        }
+
+        for (int i = 0; i < num_builtins; i++) {
+            if (strcmp(command->args[0], builtin_arr[i]) == 0) {
+                return (*builtin_fx[i])(command->args);
+            }
+        }
+
+        return launch(command);
     }
 
-    for (int i = 0; i < num_builtins; i++) {
-        if (strcmp(command->args[0], builtin_arr[i]) == 0) {
-            return (*builtin_fx[i])(command->args);
+    int pipes[pipeline->count - 1][2];
+    pid_t pids[pipeline->count];
+
+    // create pipes
+    for (int i = 0; i < pipeline->count - 1; i++) {
+        if (pipe(pipes[i]) == -1) {
+            perror("pipe");
+            return 1;
         }
     }
-    return launch(
-        command); // if not builtin then it just tries to launch to process
+
+    // fork all commands
+    for (int i = 0; i < pipeline->count; i++) {
+        pid_t pid = fork();
+
+        if (pid < 0) {
+            perror("fork");
+            return 1;
+        }
+
+        if (pid == 0) {
+            Command *command = &pipeline->commands[i];
+
+            // connect previous pipe to stdin
+            if (i > 0 && command->in_file == NULL) {
+                if (dup2(pipes[i - 1][0], STDIN_FILENO) == -1) {
+                    perror("dup2");
+                    exit(EXIT_FAILURE);
+                }
+            }
+
+            // connect current pipe to stdout
+            if (i < pipeline->count - 1 && command->out_file == NULL) {
+                if (dup2(pipes[i][1], STDOUT_FILENO) == -1) {
+                    perror("dup2");
+                    exit(EXIT_FAILURE);
+                }
+            }
+
+            // input redirection
+            if (command->in_file != NULL) {
+                int in_fd = open(command->in_file, O_RDONLY);
+                if (in_fd < 0) {
+                    perror("Error opening input file");
+                    exit(EXIT_FAILURE);
+                }
+
+                if (dup2(in_fd, STDIN_FILENO) == -1) {
+                    perror("dup2");
+                    exit(EXIT_FAILURE);
+                }
+
+                close(in_fd);
+            }
+
+            // output redirection
+            if (command->out_file != NULL) {
+                int flags = O_WRONLY | O_CREAT;
+                if (command->append) {
+                    flags |= O_APPEND;
+                } else {
+                    flags |= O_TRUNC;
+                }
+
+                int out_fd = open(command->out_file, flags, 0644);
+
+                if (out_fd < 0) {
+                    perror("Error opening output file");
+                    exit(EXIT_FAILURE);
+                }
+
+                if (dup2(out_fd, STDOUT_FILENO) == -1) {
+                    perror("dup2");
+                    exit(EXIT_FAILURE);
+                }
+
+                close(out_fd);
+            }
+
+            // close all pipe file descriptors
+            for (int j = 0; j < pipeline->count - 1; j++) {
+                close(pipes[j][0]);
+                close(pipes[j][1]);
+            }
+
+            if (execvp(command->args[0], command->args) == -1) {
+                perror("execvp");
+                exit(EXIT_FAILURE);
+            }
+        }
+        pids[i] = pid;
+    }
+
+    // parent closes all pipefds
+    for (int i = 0; i < pipeline->count - 1; i++) {
+        close(pipes[i][0]);
+        close(pipes[i][1]);
+    }
+
+    // wait for children
+    for (int i = 0; i < pipeline->count; i++) {
+        waitpid(pids[i], NULL, 0);
+    }
+
+    return 1;
 }
 
 void sh_loop() {
     char *line;
-    Command command;
+    Pipeline pipeline;
     int status;
     char cwd_buf[1024];
     do {
@@ -239,12 +394,15 @@ void sh_loop() {
         // read
         line = read_line();
         // parse
-        command = parse_line(line);
+        pipeline = parse_line(line);
         // execute
-        status = execute(&command);
+        status = execute(&pipeline);
         // freeing
         free(line);
-        free(command.args);
+        for (int i = 0; i < pipeline.count; i++) {
+            free(pipeline.commands[i].args);
+        }
+        free(pipeline.commands);
     } while (status);
 }
 
